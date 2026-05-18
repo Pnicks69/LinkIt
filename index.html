@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+    <title>Link It – Shared Bulletin (Rate Limited)</title>
+    <script type="importmap">
+        {
+            "imports": {
+                "firebase/app": "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js",
+                "firebase/firestore": "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js",
+                "firebase/analytics": "https://www.gstatic.com/firebasejs/10.8.0/firebase-analytics.js"
+            }
+        }
+    </script>
+    <style>
+        * { box-sizing: border-box; font-family: system-ui, sans-serif; }
+        body { background: #f1f5f9; margin: 0; padding: 20px; }
+        .container { max-width: 1100px; margin: 0 auto; }
+        h1 {
+            font-size: 1.8rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .logo-title {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .logo-title img {
+            height: 40px;
+            width: auto;
+            display: block;
+        }
+        .sub { color: #334155; margin-bottom: 1.5rem; border-left: 4px solid #3b82f6; padding-left: 12px; }
+        .add-card { background: white; border-radius: 20px; padding: 1.2rem 1.5rem; box-shadow: 0 2px 6px rgba(0,0,0,0.05); margin-bottom: 2rem; }
+        .form-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+        .form-row input { flex: 1; min-width: 180px; padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 40px; }
+        button { background: #3b82f6; border: none; color: white; font-weight: 600; padding: 10px 22px; border-radius: 40px; cursor: pointer; transition: 0.15s; }
+        button:disabled { background: #94a3b8; cursor: not-allowed; transform: none; }
+        button:hover:not(:disabled) { background: #2563eb; transform: scale(0.97); }
+        .btn-small { padding: 6px 14px; font-size: 0.8rem; background: #f1f5f9; color: #1e293b; border: 1px solid #cbd5e1; }
+        .danger-btn { background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
+        .link-item { background: white; border-radius: 18px; padding: 12px 18px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
+        .link-info { flex: 3; min-width: 180px; }
+        .link-title { font-weight: bold; }
+        .link-url { font-size: 0.75rem; color: #475569; word-break: break-all; margin-top: 4px; }
+        .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        .empty-message { text-align: center; background: #f8fafc; padding: 2rem; border-radius: 28px; color: #475569; border: 1px dashed #cbd5e1; }
+        footer { margin-top: 2rem; text-align: center; font-size: 0.7rem; color: #64748b; border-top: 1px solid #e2e8f0; padding-top: 1rem; }
+        .cooldown-notice { font-size: 0.8rem; color: #d97706; margin-top: 8px; text-align: right; }
+        @media (max-width: 550px) { .link-item { flex-direction: column; align-items: stretch; } .actions { justify-content: flex-start; } .logo-title img { height: 32px; } }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>
+        <div class="logo-title">
+            <img src="logo.png" alt="Link It logo">
+            <span>📌 Link It – Shared Bulletin</span>
+        </div>
+        <button id="clearAllBtn" class="btn-small danger-btn">🗑 Clear all</button>
+    </h1>
+    <div class="sub">⚡ Real‑time sync across all devices | ⏱️ One upload every 10 seconds</div>
+
+    <div class="add-card">
+        <div class="form-row">
+            <input type="text" id="titleInput" placeholder="Title (e.g. Design system)">
+            <input type="text" id="urlInput" placeholder="https:// or example.com">
+        </div>
+        <div style="display: flex; justify-content: flex-end; flex-direction: column; align-items: flex-end;">
+            <button id="addBtn">➕ Add link</button>
+            <div id="cooldownMessage" class="cooldown-notice"></div>
+        </div>
+    </div>
+
+    <div id="linksContainer" class="links-grid">
+        <div class="empty-message">⏳ Loading...</div>
+    </div>
+    <footer>🔁 Any change appears on all devices instantly. Rate limited to 1 link per 10 seconds per device.</footer>
+</div>
+
+<script type="module">
+    import { initializeApp } from "firebase/app";
+    import { getFirestore, collection, query, orderBy, onSnapshot, addDoc, deleteDoc, doc, writeBatch, getDocs } from "firebase/firestore";
+    import { getAnalytics } from "firebase/analytics";
+
+    const firebaseConfig = {
+        apiKey: "AIzaSyDkrXTqduhgiqPulAQSm0Lrx6TrOkJfYUk",
+        authDomain: "link-it-b38b3.firebaseapp.com",
+        projectId: "link-it-b38b3",
+        storageBucket: "link-it-b38b3.firebasestorage.app",
+        messagingSenderId: "313927509425",
+        appId: "1:313927509425:web:da780515fb08262e5a4990",
+        measurementId: "G-M5P6ZTLSVC"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const analytics = getAnalytics(app);
+    const db = getFirestore(app);
+    const linksRef = collection(db, "bulletin_links");
+    const q = query(linksRef, orderBy("timestamp", "desc"));
+
+    // Rate limiting variables
+    let canUpload = true;
+    let cooldownTimer = null;
+    const COOLDOWN_SECONDS = 10;
+
+    function startCooldown() {
+        canUpload = false;
+        const addBtn = document.getElementById('addBtn');
+        const cooldownDiv = document.getElementById('cooldownMessage');
+        let remaining = COOLDOWN_SECONDS;
+        
+        addBtn.disabled = true;
+        addBtn.textContent = `⏳ Wait ${remaining}s...`;
+        
+        if (cooldownTimer) clearInterval(cooldownTimer);
+        cooldownTimer = setInterval(() => {
+            remaining--;
+            if (remaining <= 0) {
+                clearInterval(cooldownTimer);
+                cooldownTimer = null;
+                canUpload = true;
+                addBtn.disabled = false;
+                addBtn.textContent = '➕ Add link';
+                cooldownDiv.textContent = '';
+            } else {
+                addBtn.textContent = `⏳ Wait ${remaining}s...`;
+                cooldownDiv.textContent = `You can add another link in ${remaining} seconds.`;
+            }
+        }, 1000);
+    }
+
+    function escapeHtml(str) {
+        if (!str) return '';
+        return str.replace(/[&<>]/g, function(m) {
+            if (m === '&') return '&amp;';
+            if (m === '<') return '&lt;';
+            if (m === '>') return '&gt;';
+            return m;
+        });
+    }
+
+    function renderLinks(snapshot) {
+        const container = document.getElementById('linksContainer');
+        if (snapshot.empty) {
+            container.innerHTML = `<div class="empty-message">📭 No links yet. Add one above — it will sync everywhere.</div>`;
+            return;
+        }
+        let html = '';
+        snapshot.forEach(docSnap => {
+            const data = docSnap.data();
+            const id = docSnap.id;
+            const title = escapeHtml(data.title || 'Untitled');
+            const url = escapeHtml(data.url);
+            html += `
+                <div class="link-item" data-id="${id}">
+                    <div class="link-info">
+                        <div class="link-title">${title}</div>
+                        <div class="link-url">${url}</div>
+                    </div>
+                    <div class="actions">
+                        <button class="btn-small copy-btn" data-url="${url}">📋 Copy</button>
+                        <button class="btn-small open-btn" data-url="${url}">🔗 Open</button>
+                        <button class="btn-small danger-btn delete-btn" data-id="${id}">✖ Delete</button>
+                    </div>
+                </div>
+            `;
+        });
+        container.innerHTML = html;
+
+        document.querySelectorAll('.copy-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const url = btn.getAttribute('data-url');
+                try {
+                    await navigator.clipboard.writeText(url);
+                    btn.innerHTML = '✅ Copied!';
+                    setTimeout(() => btn.innerHTML = '📋 Copy', 1500);
+                } catch(err) {
+                    alert('Could not copy. Manual copy: ' + url);
+                }
+            });
+        });
+        document.querySelectorAll('.open-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                window.open(btn.getAttribute('data-url'), '_blank');
+            });
+        });
+        document.querySelectorAll('.delete-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const id = btn.getAttribute('data-id');
+                if (confirm('Delete this link?')) {
+                    await deleteDoc(doc(db, "bulletin_links", id));
+                }
+            });
+        });
+    }
+
+    onSnapshot(q, (snapshot) => {
+        renderLinks(snapshot);
+    }, (error) => {
+        console.error(error);
+        document.getElementById('linksContainer').innerHTML = `<div class="empty-message">❌ Error loading data. Check Firestore rules (test mode required).</div>`;
+    });
+
+    // Add link with rate limiting
+    async function addLinkWithRateLimit() {
+        if (!canUpload) {
+            const cooldownDiv = document.getElementById('cooldownMessage');
+            cooldownDiv.style.color = '#dc2626';
+            cooldownDiv.textContent = '⛔ Please wait – only one link every 10 seconds.';
+            setTimeout(() => {
+                if (cooldownDiv.textContent.includes('⛔')) {
+                    cooldownDiv.textContent = '';
+                    cooldownDiv.style.color = '#d97706';
+                }
+            }, 2000);
+            return;
+        }
+
+        let title = document.getElementById('titleInput').value.trim();
+        let url = document.getElementById('urlInput').value.trim();
+        if (!title || !url) {
+            alert('Please enter both title and URL');
+            return;
+        }
+        if (!url.startsWith('http://') && !url.startsWith('https://')) {
+            url = 'https://' + url;
+        }
+        try {
+            new URL(url);
+        } catch(e) {
+            alert('Invalid URL. Example: https://google.com');
+            return;
+        }
+
+        try {
+            await addDoc(linksRef, {
+                title: title,
+                url: url,
+                timestamp: new Date()
+            });
+            document.getElementById('titleInput').value = '';
+            document.getElementById('urlInput').value = '';
+            startCooldown();
+        } catch(err) {
+            alert('Failed to add: ' + err.message);
+        }
+    }
+
+    document.getElementById('addBtn').addEventListener('click', addLinkWithRateLimit);
+    document.getElementById('clearAllBtn').addEventListener('click', async () => {
+        if (confirm('⚠️ Delete ALL links from the shared board? This cannot be undone.')) {
+            try {
+                const snapshot = await getDocs(linksRef);
+                const batch = writeBatch(db);
+                snapshot.docs.forEach(docSnap => batch.delete(docSnap.ref));
+                await batch.commit();
+            } catch(err) {
+                alert('Failed to clear: ' + err.message);
+            }
+        }
+    });
+    document.getElementById('titleInput').addEventListener('keypress', (e) => { if(e.key === 'Enter') addLinkWithRateLimit(); });
+    document.getElementById('urlInput').addEventListener('keypress', (e) => { if(e.key === 'Enter') addLinkWithRateLimit(); });
+</script>
+</body>
+</html>
